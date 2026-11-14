@@ -5,8 +5,27 @@ use serenity::{
     MessageId,
 };
 use sqlx::Row;
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 type DashboardError = Box<dyn std::error::Error + Send + Sync>;
+
+static DASHBOARD_LOCKS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<()>>>>> = OnceLock::new();
+
+async fn lock_dashboard(creator_id: i64) -> OwnedMutexGuard<()> {
+    let locks = DASHBOARD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let lock = {
+        let mut locks = locks.lock().await;
+        locks
+            .entry(creator_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
 
 pub async fn update_dashboard(
     ctx: &serenity::Context,
@@ -17,6 +36,16 @@ pub async fn update_dashboard(
 }
 
 pub async fn update_dashboard_with_chart(
+    ctx: &serenity::Context,
+    data: &Data,
+    creator_id: i64,
+    refresh_chart: bool,
+) -> Result<(), DashboardError> {
+    let _guard = lock_dashboard(creator_id).await;
+    update_dashboard_locked(ctx, data, creator_id, refresh_chart).await
+}
+
+async fn update_dashboard_locked(
     ctx: &serenity::Context,
     data: &Data,
     creator_id: i64,
@@ -144,9 +173,9 @@ pub async fn update_dashboard_with_chart(
         .field("Twitch Followers", format!("{twitch_followers}"), true)
         .field("YouTube Subscribers", format!("{yt_subs}"), true)
         .field("Discord Members", format!("{discord_members}"), true)
-        .footer(CreateEmbedFooter::new(
-            "CyberPup Bot · Updates automatically",
-        ));
+        .footer(CreateEmbedFooter::new(format!(
+            "CyberPup Bot · Updates automatically · CPD:{creator_id}"
+        )));
 
     if let Some(username) = twitch_username.as_deref().filter(|s| !s.is_empty()) {
         embed = embed.url(format!("https://twitch.tv/{username}"));
@@ -171,7 +200,44 @@ pub async fn update_dashboard_with_chart(
     let chart_path = format!("/tmp/cyberpup_creator_{creator_id}_growth.png");
     let channel = ChannelId::new(channel_id);
 
-    let existing_message_id = sticky_message_id.and_then(|id| u64::try_from(id).ok());
+    let mut existing_message_id = sticky_message_id.and_then(|id| u64::try_from(id).ok());
+
+    // Recover a dashboard if Discord accepted a previous send but saving its
+    // message ID to SQLite failed. The stable footer marker identifies only
+    // this creator's dashboard.
+    if existing_message_id.is_none() {
+        let recent_messages = channel
+            .messages(&ctx.http, serenity::GetMessages::new().limit(100))
+            .await?;
+        let bot_id = ctx.cache.current_user().id;
+        let marker = format!("CPD:{creator_id}");
+        let mut matches = recent_messages.into_iter().filter(|message| {
+            message.author.id == bot_id
+                && message.embeds.iter().any(|embed| {
+                    embed
+                        .footer
+                        .as_ref()
+                        .is_some_and(|footer| footer.text.contains(&marker))
+                })
+        });
+
+        if let Some(message) = matches.next() {
+            existing_message_id = Some(message.id.get());
+            for duplicate in matches {
+                if let Err(error) = channel.delete_message(&ctx.http, duplicate.id).await {
+                    eprintln!(
+                        "[CreatorStats] Could not remove duplicate dashboard {} for creator {creator_id}: {error}",
+                        duplicate.id
+                    );
+                }
+            }
+            sqlx::query("UPDATE creators SET sticky_message_id = ? WHERE id = ?")
+                .bind(i64::try_from(message.id.get())?)
+                .bind(creator_id)
+                .execute(&data.stats_db)
+                .await?;
+        }
+    }
 
     // A missing dashboard needs a fresh chart regardless of the growth schedule.
     let should_generate_chart = refresh_chart || existing_message_id.is_none();
@@ -219,12 +285,20 @@ pub async fn update_dashboard_with_chart(
             .await
         {
             Ok(_) => return Ok(()),
-            Err(error) => {
-                eprintln!(
-                    "[CreatorStats] Could not edit dashboard for {name}; \
-                     creating a replacement: {error}"
-                );
+            Err(error)
+                if matches!(
+                    &error,
+                    serenity::Error::Http(http_error)
+                        if http_error.status_code() == Some(serenity::http::StatusCode::NOT_FOUND)
+                ) =>
+            {
+                eprintln!("[CreatorStats] Dashboard for {name} no longer exists; replacing it.");
+                sqlx::query("UPDATE creators SET sticky_message_id = NULL WHERE id = ?")
+                    .bind(creator_id)
+                    .execute(&data.stats_db)
+                    .await?;
             }
+            Err(error) => return Err(error.into()),
         }
     }
 
@@ -279,6 +353,47 @@ pub async fn update_dashboard_with_chart(
 
     Ok(())
 }
+
+async fn reposition_dashboard(
+    ctx: &serenity::Context,
+    data: &Data,
+    channel_id: ChannelId,
+    creator_id: i64,
+) -> Result<(), DashboardError> {
+    let _guard = lock_dashboard(creator_id).await;
+
+    let sticky_message_id: Option<i64> = sqlx::query_scalar(
+        "SELECT sticky_message_id FROM creators WHERE id = ? AND dashboard_channel_id = ?",
+    )
+    .bind(creator_id)
+    .bind(i64::try_from(channel_id.get())?)
+    .fetch_optional(&data.stats_db)
+    .await?
+    .flatten();
+
+    if let Some(message_id) = sticky_message_id.and_then(|id| u64::try_from(id).ok()) {
+        match channel_id
+            .delete_message(&ctx.http, MessageId::new(message_id))
+            .await
+        {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    &error,
+                    serenity::Error::Http(http_error)
+                        if http_error.status_code() == Some(serenity::http::StatusCode::NOT_FOUND)
+                ) => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        sqlx::query("UPDATE creators SET sticky_message_id = NULL WHERE id = ?")
+            .bind(creator_id)
+            .execute(&data.stats_db)
+            .await?;
+    }
+
+    update_dashboard_locked(ctx, data, creator_id, false).await
+}
 static DASHBOARD_STICKY_TASKS: std::sync::OnceLock<
     tokio::sync::Mutex<std::collections::HashMap<u64, tokio::task::JoinHandle<()>>>,
 > = std::sync::OnceLock::new();
@@ -301,12 +416,10 @@ pub async fn handle_message(ctx: &serenity::Context, data: &Data, channel_id: Ch
     let task = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        let dashboards = match sqlx::query(
-            "SELECT id, sticky_message_id FROM creators WHERE dashboard_channel_id = ?",
-        )
-        .bind(channel_key as i64)
-        .fetch_all(&data.stats_db)
-        .await
+        let dashboards = match sqlx::query("SELECT id FROM creators WHERE dashboard_channel_id = ?")
+            .bind(channel_key as i64)
+            .fetch_all(&data.stats_db)
+            .await
         {
             Ok(rows) => rows,
             Err(error) => {
@@ -324,29 +437,7 @@ pub async fn handle_message(ctx: &serenity::Context, data: &Data, channel_id: Ch
                 }
             };
 
-            let message_id: Option<i64> = match dashboard.try_get("sticky_message_id") {
-                Ok(id) => id,
-                Err(error) => {
-                    eprintln!("[CreatorStats] Invalid dashboard message ID: {error}");
-                    continue;
-                }
-            };
-
-            // Remove the old dashboard message so the replacement appears
-            // at the bottom of the channel.
-            if let Some(message_id) = message_id {
-                if let Ok(message_id) = u64::try_from(message_id) {
-                    if let Err(error) = channel_id
-                        .delete_message(&ctx.http, MessageId::new(message_id))
-                        .await
-                    {
-                        eprintln!("[CreatorStats] Could not remove old dashboard message: {error}");
-                    }
-                }
-            }
-
-            // Reuse the existing chart rather than regenerating it.
-            if let Err(error) = update_dashboard_with_chart(&ctx, &data, creator_id, false).await {
+            if let Err(error) = reposition_dashboard(&ctx, &data, channel_id, creator_id).await {
                 eprintln!("[CreatorStats] Failed to reposition dashboard {creator_id}: {error}");
             }
         }
