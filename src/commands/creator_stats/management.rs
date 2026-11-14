@@ -14,7 +14,7 @@ use std::time::Duration;
 const PANEL_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CREATORS_IN_PANEL: usize = 20;
 
-/// /creator manage
+/// Manage creator profiles, tracking settings, and dashboard preferences.
 #[poise::command(
     slash_command,
     rename = "manage",
@@ -889,7 +889,7 @@ fn optional_input(value: &str) -> Option<String> {
     }
 }
 
-/// /creator
+/// Configure and manage creator statistics tracking.
 #[poise::command(slash_command, subcommands("manage"))]
 pub async fn creator(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())

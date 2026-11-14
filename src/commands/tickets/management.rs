@@ -14,6 +14,7 @@ use std::time::Duration;
 
 const PANEL_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Configure ticket routing, categories, limits, and the server's ticket panel.
 #[poise::command(
     slash_command,
     subcommands("manage", "open", "add", "remove", "rename")
@@ -22,6 +23,7 @@ pub async fn ticket(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Open the interactive ticket administration dashboard.
 #[poise::command(slash_command, required_permissions = "MANAGE_GUILD")]
 pub async fn manage(ctx: Context<'_>) -> Result<(), Error> {
     let Some(guild_id) = ctx.guild_id().map(|id| id.get()) else {
@@ -687,6 +689,7 @@ fn panel_components(
         .collect()
 }
 
+/// Manually create a ticket, optionally assigning a member, role, or topic.
 #[poise::command(slash_command, required_permissions = "MANAGE_MESSAGES")]
 pub async fn open(
     ctx: Context<'_>,
@@ -785,6 +788,7 @@ pub async fn open(
     Ok(())
 }
 
+/// Give a member access to the current open ticket.
 #[poise::command(slash_command, required_permissions = "MANAGE_MESSAGES")]
 pub async fn add(
     ctx: Context<'_>,
@@ -793,6 +797,7 @@ pub async fn add(
     update_ticket_member(ctx, user, true).await
 }
 
+/// Remove a member's access to the current open ticket.
 #[poise::command(slash_command, required_permissions = "MANAGE_MESSAGES")]
 pub async fn remove(
     ctx: Context<'_>,
@@ -844,6 +849,7 @@ fn ticket_member_permissions() -> Permissions {
         | Permissions::ATTACH_FILES
 }
 
+/// Rename the current open ticket channel.
 #[poise::command(slash_command, required_permissions = "MANAGE_MESSAGES")]
 pub async fn rename(
     ctx: Context<'_>,

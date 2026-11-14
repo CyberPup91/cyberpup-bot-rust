@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const PANEL_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// /greeter manage
+/// Configure welcome and farewell messages for this server.
 #[poise::command(
     slash_command,
     rename = "manage",
@@ -169,7 +169,7 @@ fn truncate(value: &str, max_chars: usize) -> String {
     result
 }
 
-/// /greeter
+/// Manage automatic member welcome and farewell messages.
 #[poise::command(slash_command, subcommands("manage"))]
 pub async fn greeter(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())

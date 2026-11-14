@@ -1,11 +1,13 @@
 use crate::{Context, Error};
 use poise::serenity_prelude as serenity;
 
+/// Manage the bot's voice connection and voice channel status.
 #[poise::command(slash_command, subcommands("join", "leave", "setstatus"))]
 pub async fn vc(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Connect the bot to a voice channel.
 #[poise::command(slash_command)]
 pub async fn join(
     ctx: Context<'_>,
@@ -40,6 +42,7 @@ pub async fn join(
     Ok(())
 }
 
+/// Disconnect the bot from its current voice channel.
 #[poise::command(slash_command)]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -63,6 +66,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Set the status text shown on a voice channel.
 #[poise::command(slash_command)]
 pub async fn setstatus(
     ctx: Context<'_>,

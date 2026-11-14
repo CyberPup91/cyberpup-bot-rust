@@ -187,6 +187,7 @@ async fn patch_guild_bot_profile(
 // Subcommands for /botprofile
 // ------------------------------------------------------------------
 
+/// Update the bot's global status and activity shown on Discord.
 #[poise::command(slash_command)]
 pub async fn status(
     ctx: Context<'_>,
@@ -237,6 +238,7 @@ pub async fn status(
     Ok(())
 }
 
+/// Set or reset this server's bot avatar.
 #[poise::command(slash_command)]
 pub async fn avatar(
     ctx: Context<'_>,
@@ -273,6 +275,7 @@ pub async fn avatar(
     Ok(())
 }
 
+/// Set or reset this server's bot banner.
 #[poise::command(slash_command)]
 pub async fn banner(
     ctx: Context<'_>,
@@ -309,6 +312,7 @@ pub async fn banner(
     Ok(())
 }
 
+/// Set or reset the bot's profile bio for this server.
 #[poise::command(slash_command)]
 pub async fn bio(
     ctx: Context<'_>,
@@ -337,6 +341,7 @@ pub async fn bio(
     Ok(())
 }
 
+/// Set or reset the bot's nickname in this server.
 #[poise::command(slash_command)]
 pub async fn nickname(
     ctx: Context<'_>,
@@ -359,6 +364,7 @@ pub async fn nickname(
     Ok(())
 }
 
+/// Customize the bot's profile and presence in this server.
 #[poise::command(
     slash_command,
     guild_only,
@@ -373,6 +379,7 @@ pub async fn botprofile(_: Context<'_>) -> Result<(), Error> {
 // Subcommands for /whitelabel
 // ------------------------------------------------------------------
 
+/// View the current whitelabel access and presence configuration.
 #[poise::command(slash_command)]
 pub async fn view(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -405,6 +412,7 @@ pub async fn view(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Set this server as the bot's main server and clear the main role.
 #[poise::command(slash_command)]
 pub async fn mainserver(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -421,6 +429,7 @@ pub async fn mainserver(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Set or clear the role required to use whitelabel features.
 #[poise::command(slash_command)]
 pub async fn mainrole(
     ctx: Context<'_>,
@@ -436,6 +445,7 @@ pub async fn mainrole(
     Ok(())
 }
 
+/// Set the message shown to users blocked by whitelabel access rules.
 #[poise::command(slash_command)]
 pub async fn disallowedmsg(
     ctx: Context<'_>,
@@ -450,6 +460,7 @@ pub async fn disallowedmsg(
     Ok(())
 }
 
+/// Configure which server and role can use the bot's whitelabel features.
 #[poise::command(
     slash_command,
     guild_only,

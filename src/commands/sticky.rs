@@ -454,6 +454,7 @@ fn parse_embed_color(input: Option<&str>) -> Result<u32, &'static str> {
 // Slash commands
 // -----------------------------------------------------------------------------
 
+/// Create or replace a sticky text message in this channel.
 #[poise::command(slash_command)]
 pub async fn text(ctx: Context<'_>) -> Result<(), Error> {
     if let poise::Context::Application(app_ctx) = ctx {
@@ -509,6 +510,7 @@ pub async fn text(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Create or replace a sticky embed in this channel.
 #[poise::command(slash_command)]
 pub async fn embed(ctx: Context<'_>) -> Result<(), Error> {
     if let poise::Context::Application(app_ctx) = ctx {
@@ -595,6 +597,7 @@ pub async fn embed(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Remove the sticky message configured for this channel.
 #[poise::command(slash_command)]
 pub async fn remove(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -646,6 +649,7 @@ pub async fn remove(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Remove all sticky messages configured in this server.
 #[poise::command(slash_command, rename = "remove-all")]
 pub async fn remove_all(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -717,6 +721,7 @@ pub async fn remove_all(ctx: Context<'_>) -> Result<(), Error> {
 // Command groups
 // -----------------------------------------------------------------------------
 
+/// Create, update, or remove sticky messages in server channels.
 #[poise::command(
     slash_command,
     guild_only,
@@ -727,6 +732,7 @@ pub async fn sticky(_: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Pin a message as the sticky message for its channel.
 #[poise::command(
     context_menu_command = "Pin as Sticky",
     guild_only,

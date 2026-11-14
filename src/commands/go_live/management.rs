@@ -14,7 +14,7 @@ use std::time::Duration;
 const PANEL_TIMEOUT: Duration = Duration::from_secs(300);
 const MAX_CREATORS_IN_PANEL: usize = 20;
 
-/// /golive manage
+/// Configure creators, alert channels, roles, and live notification settings.
 #[poise::command(
     slash_command,
     rename = "manage",
@@ -971,7 +971,7 @@ async fn respond_component(
     Ok(())
 }
 
-/// /golive
+/// Manage Twitch live stream notifications for this server.
 #[poise::command(slash_command, subcommands("manage"))]
 pub async fn golive(_ctx: Context<'_>) -> Result<(), Error> {
     Ok(())

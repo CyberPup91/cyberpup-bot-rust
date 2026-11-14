@@ -25,6 +25,7 @@ pub enum PurgeFilterChoice {
     Reactions,
 }
 
+/// Export this server's role and channel IDs to a text file.
 #[poise::command(slash_command, rename = "dump-ids")]
 pub async fn dump_ids(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -53,6 +54,7 @@ pub async fn dump_ids(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Export the bot application's custom emoji markup.
 #[poise::command(slash_command, rename = "dump-emojis")]
 pub async fn dump_emojis(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -110,6 +112,7 @@ pub async fn dump_emojis(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Set the bot's global presence to invisible.
 #[poise::command(slash_command, rename = "toggle-status")]
 pub async fn toggle_status(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -122,6 +125,7 @@ pub async fn toggle_status(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Delete or simulate deleting recent messages using optional filters.
 #[poise::command(slash_command)]
 pub async fn purge(
     ctx: Context<'_>,
@@ -221,6 +225,7 @@ pub async fn purge(
     Ok(())
 }
 
+/// Sync the bot's slash commands to this server immediately.
 #[poise::command(slash_command, rename = "sync")]
 pub async fn sync_guild(ctx: Context<'_>) -> Result<(), Error> {
     ctx.defer_ephemeral().await?;
@@ -232,6 +237,7 @@ pub async fn sync_guild(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Run administrative utilities for this server.
 #[poise::command(
     slash_command,
     guild_only,
