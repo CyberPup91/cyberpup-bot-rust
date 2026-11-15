@@ -253,6 +253,74 @@ pub async fn delete_sticky_config(
     Ok(())
 }
 
+/// Encodes the sticky identity using zero-width characters so a sent message
+/// can be recovered if Discord accepts it but the database write fails.
+fn sticky_marker(guild_id: i64, channel_id: u64) -> String {
+    let mut marker = String::from("\u{2063}");
+    let symbols = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'];
+    for byte in guild_id
+        .to_be_bytes()
+        .into_iter()
+        .chain(channel_id.to_be_bytes())
+    {
+        for shift in [6, 4, 2, 0] {
+            marker.push(symbols[((byte >> shift) & 0b11) as usize]);
+        }
+    }
+    marker.push('\u{2063}');
+    marker
+}
+
+async fn find_sticky_messages(
+    ctx: &serenity::Context,
+    channel_id: serenity::ChannelId,
+    marker: &str,
+) -> Result<Vec<serenity::Message>, Error> {
+    let bot_id = ctx.cache.current_user().id;
+    let messages = channel_id
+        .messages(&ctx.http, serenity::GetMessages::new().limit(100))
+        .await?;
+
+    Ok(messages
+        .into_iter()
+        .filter(|message| message.author.id == bot_id && message.content.contains(marker))
+        .collect())
+}
+
+async fn adopt_sticky_messages(
+    ctx: &serenity::Context,
+    data: &crate::Data,
+    channel_id: serenity::ChannelId,
+    config: &StickyConfig,
+    marker: &str,
+) -> Result<bool, Error> {
+    let mut matches = find_sticky_messages(ctx, channel_id, marker)
+        .await?
+        .into_iter();
+    let Some(message) = matches.next() else {
+        return Ok(false);
+    };
+
+    update_sticky_message_id(
+        &data.db,
+        config.guild_id,
+        channel_id.get(),
+        message.id.get(),
+    )
+    .await?;
+
+    for duplicate in matches {
+        if let Err(error) = channel_id.delete_message(&ctx.http, duplicate.id).await {
+            eprintln!(
+                "[StickyPosts] Could not remove duplicate sticky {} in channel {channel_id}: {error}",
+                duplicate.id
+            );
+        }
+    }
+
+    Ok(true)
+}
+
 // -----------------------------------------------------------------------------
 // Embed reconstruction
 // -----------------------------------------------------------------------------
@@ -375,16 +443,38 @@ async fn stick_message_locked(
         }
     };
 
+    let marker = sticky_marker(config.guild_id, channel_id.get());
+
+    // If the last send reached Discord but its ID was not saved, reuse it
+    // instead of posting another copy.
+    if config.message_id.is_none()
+        && adopt_sticky_messages(ctx, data, channel_id, &config, &marker).await?
+    {
+        return Ok(());
+    }
+
     // Remove the previous sticky message before posting its replacement.
     if let Some(message_id) = config.message_id {
         let old_message_id = serenity::MessageId::new(message_id as u64);
 
-        if let Err(error) = channel_id.delete_message(&ctx.http, old_message_id).await {
-            eprintln!(
-                "[StickyPosts] Could not delete previous sticky \
-                 message {message_id} in channel {channel_id}: {error}"
-            );
+        match channel_id.delete_message(&ctx.http, old_message_id).await {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    &error,
+                    serenity::Error::Http(http_error)
+                        if http_error.status_code() == Some(serenity::http::StatusCode::NOT_FOUND)
+                ) => {}
+            Err(error) => return Err(Box::new(error)),
         }
+
+        sqlx::query(
+            "UPDATE sticky_posts SET message_id = NULL WHERE guild_id = ? AND channel_id = ?",
+        )
+        .bind(config.guild_id)
+        .bind(channel_id.get() as i64)
+        .execute(&data.db)
+        .await?;
     }
 
     let embed = match config.embed_data.as_deref() {
@@ -394,8 +484,12 @@ async fn stick_message_locked(
 
     let mut builder = serenity::CreateMessage::new();
 
-    if let Some(content) = config.content {
-        builder = builder.content(content);
+    if let Some(content) = config.content.as_deref() {
+        builder = builder.content(format!("{content}{marker}"));
+    } else {
+        // Keep the identity invisible while still searchable after ambiguous
+        // send failures or a failed database update.
+        builder = builder.content(marker.clone());
     }
 
     if let Some(embed) = embed {
@@ -413,11 +507,13 @@ async fn stick_message_locked(
             .await?;
         }
         Err(error) => {
-            eprintln!(
-                "[StickyPosts] Error sending sticky in channel \
-                 {channel_id}: {error}"
-            );
+            // Discord may have accepted the request before the connection
+            // failed. Search for our identity marker before allowing a retry.
+            if adopt_sticky_messages(ctx, data, channel_id, &config, &marker).await? {
+                return Ok(());
+            }
 
+            eprintln!("[StickyPosts] Error sending sticky in channel {channel_id}: {error}");
             return Err(Box::new(error));
         }
     }

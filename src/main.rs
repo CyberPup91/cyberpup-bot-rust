@@ -20,6 +20,13 @@ pub struct Data {
     pub stats_db: sqlx::SqlitePool,
     pub greeters_db: sqlx::SqlitePool,
     pub tickets_db: sqlx::SqlitePool,
+    pub counting_db: sqlx::SqlitePool,
+    pub moderation_db: sqlx::SqlitePool,
+    pub warnings_db: sqlx::SqlitePool,
+    pub message_logger_db: sqlx::SqlitePool,
+    pub reaction_roles_db: sqlx::SqlitePool,
+    pub vents_db: sqlx::SqlitePool,
+    pub builder_sessions: Arc<Mutex<HashMap<u64, commands::builder::BuilderDraft>>>,
     pub http: reqwest::Client,
     pub twitch: Arc<commands::creator_stats::api::TwitchApi>,
     pub sticky_channels: Arc<RwLock<HashSet<u64>>>,
@@ -66,6 +73,9 @@ async fn handle_event(
 
         // Member joined the server.
         serenity::FullEvent::GuildMemberAddition { new_member } => {
+            if let Err(error) = commands::moderation::member_join(ctx, data, new_member).await {
+                tracing::warn!("Sticky role restoration failed: {error}");
+            }
             if new_member.pending {
                 println!(
                     "👋 Member {} is pending screening; delaying welcome.",
@@ -99,6 +109,18 @@ async fn handle_event(
             new,
             ..
         } => {
+            if let Some(member) = new.as_ref() {
+                if let Err(error) = commands::moderation::member_update(
+                    ctx,
+                    data,
+                    old_if_available.as_ref(),
+                    member,
+                )
+                .await
+                {
+                    tracing::warn!("Sticky role snapshot update failed: {error}");
+                }
+            }
             if let (Some(old_member), Some(new_member)) = (old_if_available.as_ref(), new.as_ref())
             {
                 if old_member.pending && !new_member.pending {
@@ -131,6 +153,11 @@ async fn handle_event(
 
         // Member left or was removed from the server.
         serenity::FullEvent::GuildMemberRemoval { guild_id, user, .. } => {
+            if let Err(error) =
+                commands::moderation::member_remove(ctx, data, *guild_id, user).await
+            {
+                tracing::warn!("Could not save sticky role snapshot: {error}");
+            }
             let guild = { ctx.cache.guild(*guild_id).map(|g| (*g).clone()) };
 
             if let Some(guild) = guild {
@@ -155,10 +182,26 @@ async fn handle_event(
             }
         }
 
+        serenity::FullEvent::VoiceStateUpdate { old, new } => {
+            if let Err(error) =
+                commands::vc::handle_voice_state_update(ctx, old.as_ref(), new).await
+            {
+                tracing::warn!("Voice recovery event failed: {error}");
+            }
+        }
+
         serenity::FullEvent::Message { new_message } => {
             let Some(guild_id) = new_message.guild_id else {
                 return Ok(());
             };
+
+            if let Err(error) = commands::vents::handle_message(ctx, data, new_message).await {
+                tracing::warn!("Vents panel sticky handler failed: {error}");
+            }
+
+            if let Err(error) = commands::message_logger::log_sent(ctx, data, new_message).await {
+                tracing::warn!("Could not log message: {error}");
+            }
 
             let channel_id = new_message.channel_id;
             let ch_id = channel_id.get();
@@ -182,6 +225,13 @@ async fn handle_event(
             // reposition the Creator Stats dashboard.
             if !is_dashboard_message && (!new_message.author.bot || is_milestone_alert) {
                 commands::creator_stats::dashboard::handle_message(ctx, data, channel_id).await;
+            }
+
+            if !new_message.author.bot {
+                if let Err(error) = commands::counting::handle_message(ctx, data, new_message).await
+                {
+                    tracing::error!("Counting message handler failed: {error}");
+                }
             }
 
             // Keep the ordinary Sticky cog's existing bot-message behavior.
@@ -214,6 +264,13 @@ async fn handle_event(
             let stats_db = data.stats_db.clone();
             let greeters_db = data.greeters_db.clone();
             let tickets_db = data.tickets_db.clone();
+            let counting_db = data.counting_db.clone();
+            let moderation_db = data.moderation_db.clone();
+            let warnings_db = data.warnings_db.clone();
+            let message_logger_db = data.message_logger_db.clone();
+            let reaction_roles_db = data.reaction_roles_db.clone();
+            let vents_db = data.vents_db.clone();
+            let builder_sessions = data.builder_sessions.clone();
             let http = data.http.clone();
             let twitch = data.twitch.clone();
             let sticky_chans = data.sticky_channels.clone();
@@ -234,6 +291,13 @@ async fn handle_event(
                     stats_db,
                     greeters_db,
                     tickets_db,
+                    counting_db,
+                    moderation_db,
+                    warnings_db,
+                    message_logger_db,
+                    reaction_roles_db,
+                    vents_db,
+                    builder_sessions,
                     http,
                     twitch,
                     sticky_channels: sticky_chans,
@@ -265,6 +329,67 @@ async fn handle_event(
             let _ = start_tx.send(());
         }
 
+        serenity::FullEvent::MessageUpdate {
+            old_if_available,
+            new,
+            event,
+        } => {
+            if let Err(error) = commands::message_logger::log_edit(
+                ctx,
+                data,
+                old_if_available.as_ref(),
+                new.as_ref(),
+                event,
+            )
+            .await
+            {
+                tracing::warn!("Could not log edited message: {error}");
+            }
+        }
+
+        serenity::FullEvent::MessageDelete {
+            channel_id,
+            deleted_message_id,
+            guild_id,
+        } => {
+            if let Err(error) =
+                commands::reaction_roles::message_deleted(data, *deleted_message_id).await
+            {
+                tracing::warn!(
+                    "Could not remove reaction-role configuration for deleted message: {error}"
+                );
+            }
+            if let Some(guild_id) = guild_id {
+                if let Err(error) = commands::message_logger::log_deleted_ids(
+                    ctx,
+                    data,
+                    *guild_id,
+                    *channel_id,
+                    *deleted_message_id,
+                )
+                .await
+                {
+                    tracing::warn!("Could not log deleted message: {error}");
+                }
+            }
+        }
+
+        serenity::FullEvent::ReactionAdd { add_reaction } => {
+            if let Err(error) =
+                commands::reaction_roles::reaction_added(ctx, data, add_reaction).await
+            {
+                tracing::warn!("Could not assign reaction role: {error}");
+            }
+        }
+
+        serenity::FullEvent::ReactionRemove { removed_reaction } => {
+            if let Err(error) =
+                commands::reaction_roles::reaction_removed(ctx, data, removed_reaction).await
+            {
+                tracing::warn!("Could not remove reaction role: {error}");
+            }
+        }
+
         serenity::FullEvent::ChannelDelete { channel, .. } => {
             let ch_id = channel.id.get();
             let guild_id = channel.guild_id.get() as i64;
@@ -288,6 +413,21 @@ async fn handle_event(
         serenity::FullEvent::InteractionCreate {
             interaction: serenity::Interaction::Component(component),
         } => {
+            if commands::vents::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
+            if commands::builder::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
+            if commands::moderation::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
+            if commands::warnings::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
+            if commands::counting::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
             if let Err(error) =
                 commands::tickets::interactions::handle_component(ctx, data, component).await
             {
@@ -302,6 +442,19 @@ async fn handle_event(
                         ),
                     )
                     .await;
+            }
+        }
+
+        serenity::FullEvent::InteractionCreate { interaction } => {
+            if let Some(modal) = interaction.as_modal_submit() {
+                commands::counting::handle_modal(ctx, data, modal).await?;
+                commands::vents::handle_modal(ctx, data, modal).await?;
+            }
+        }
+
+        serenity::FullEvent::ChannelCreate { channel } => {
+            if let Err(error) = commands::warnings::channel_created(ctx, data, channel).await {
+                tracing::warn!("Could not apply mute-role channel restrictions: {error}");
             }
         }
 
@@ -340,7 +493,22 @@ async fn main() -> Result<(), Error> {
 
     // Dedicated ticket database, preserving compatibility with the Python cog.
     let tickets_db = sqlx::SqlitePool::connect("sqlite:///app/data/tickets.db?mode=rwc").await?;
+    let counting_db = sqlx::SqlitePool::connect("sqlite:///app/data/counting.db?mode=rwc").await?;
+    let moderation_db =
+        sqlx::SqlitePool::connect("sqlite:///app/data/moderation.db?mode=rwc").await?;
+    let warnings_db = sqlx::SqlitePool::connect("sqlite:///app/data/warnings.db?mode=rwc").await?;
+    let message_logger_db =
+        sqlx::SqlitePool::connect("sqlite:///app/data/message_logger.db?mode=rwc").await?;
+    let reaction_roles_db =
+        sqlx::SqlitePool::connect("sqlite:///app/data/reaction_roles.db?mode=rwc").await?;
+    let vents_db = sqlx::SqlitePool::connect("sqlite:///app/data/vents.db?mode=rwc").await?;
     commands::tickets::database::init_db(&tickets_db).await?;
+    commands::counting::init_db(&counting_db).await?;
+    commands::moderation::init_db(&moderation_db).await?;
+    commands::warnings::init_db(&warnings_db).await?;
+    commands::message_logger::init_db(&message_logger_db).await?;
+    commands::reaction_roles::init_db(&reaction_roles_db).await?;
+    commands::vents::init_db(&vents_db).await?;
 
     // Shared Twitch API client.
     let twitch = Arc::new(commands::creator_stats::api::TwitchApi::from_env(
@@ -348,6 +516,7 @@ async fn main() -> Result<(), Error> {
     )?);
 
     commands::sticky::init_db(&db).await?;
+    commands::builder::init_db(&db).await?;
 
     let sticky_channels = Arc::new(RwLock::new(
         commands::sticky::load_sticky_channels(&db).await?,
@@ -362,6 +531,13 @@ async fn main() -> Result<(), Error> {
         stats_db,
         greeters_db,
         tickets_db,
+        counting_db,
+        moderation_db,
+        warnings_db,
+        message_logger_db,
+        reaction_roles_db,
+        vents_db,
+        builder_sessions: Arc::new(Mutex::new(HashMap::new())),
         http,
         twitch,
         sticky_channels,
@@ -393,6 +569,7 @@ async fn main() -> Result<(), Error> {
                     framework_data.clone(),
                 );
                 commands::go_live::polling::start_background(ctx.clone(), framework_data.clone());
+                commands::counting::start_background(ctx.clone(), framework_data.clone());
 
                 Ok(framework_data)
             })

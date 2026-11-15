@@ -1,4 +1,5 @@
 use crate::Data;
+use chrono::{DateTime, Duration as ChronoDuration, NaiveDateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serenity::{
     ChannelId, CreateAttachment, CreateEmbed, CreateEmbedFooter, CreateMessage, EditMessage,
@@ -12,6 +13,34 @@ use std::{
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 type DashboardError = Box<dyn std::error::Error + Send + Sync>;
+
+fn parse_timestamp(value: Option<&str>) -> Option<DateTime<Utc>> {
+    let value = value?;
+
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(value) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+
+    if let Ok(parsed) = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S") {
+        return Some(parsed.and_utc());
+    }
+
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+        .ok()
+        .map(|parsed| parsed.and_utc())
+}
+
+fn dashboard_marker(creator_id: i64) -> String {
+    let mut marker = String::from("\u{2063}");
+    let symbols = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}'];
+    for byte in creator_id.to_be_bytes() {
+        for shift in [6, 4, 2, 0] {
+            marker.push(symbols[((byte >> shift) & 0b11) as usize]);
+        }
+    }
+    marker.push('\u{2063}');
+    marker
+}
 
 static DASHBOARD_LOCKS: OnceLock<Mutex<HashMap<i64, Arc<Mutex<()>>>>> = OnceLock::new();
 
@@ -59,7 +88,10 @@ async fn update_dashboard_locked(
             youtube_id,
             discord_invite_code,
             dashboard_channel_id,
-            sticky_message_id
+            sticky_message_id,
+            check_delay_minutes,
+            last_check_time,
+            last_growth_check
         FROM creators
         WHERE id = ?
         "#,
@@ -81,6 +113,13 @@ async fn update_dashboard_locked(
     let discord_invite: Option<String> = creator.try_get("discord_invite_code")?;
     let dashboard_channel_id: Option<i64> = creator.try_get("dashboard_channel_id")?;
     let sticky_message_id: Option<i64> = creator.try_get("sticky_message_id")?;
+    let check_delay_minutes = creator
+        .try_get::<Option<i64>, _>("check_delay_minutes")?
+        .unwrap_or(10)
+        .clamp(1, 1440);
+    let discord_check_interval = check_delay_minutes.max(60);
+    let last_check_time: Option<String> = creator.try_get("last_check_time")?;
+    let last_growth_check: Option<String> = creator.try_get("last_growth_check")?;
 
     let Some(channel_id) = dashboard_channel_id else {
         return Ok(());
@@ -150,6 +189,15 @@ async fn update_dashboard_locked(
         .as_ref()
         .and_then(|row| row.try_get("game_name").ok().flatten());
 
+    let now = Utc::now();
+    let last_updated = parse_timestamp(last_check_time.as_deref())
+        .map(|timestamp| timestamp.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| "pending first poll".to_string());
+    let next_growth_update = parse_timestamp(last_growth_check.as_deref())
+        .map(|timestamp| timestamp + ChronoDuration::minutes(check_delay_minutes))
+        .filter(|timestamp| *timestamp > now)
+        .unwrap_or_else(|| now + ChronoDuration::minutes(1));
+
     let mut description = if is_live {
         format!("🔴 **LIVE NOW** · {viewers} viewers")
     } else {
@@ -166,6 +214,11 @@ async fn update_dashboard_locked(
         }
     }
 
+    description.push_str(&format!(
+        "\n\n⏭️ **Next growth update:** <t:{}:R>",
+        next_growth_update.timestamp()
+    ));
+
     let mut embed = CreateEmbed::new()
         .title(format!("📊 {name} — Creator Stats"))
         .description(description)
@@ -174,7 +227,8 @@ async fn update_dashboard_locked(
         .field("YouTube Subscribers", format!("{yt_subs}"), true)
         .field("Discord Members", format!("{discord_members}"), true)
         .footer(CreateEmbedFooter::new(format!(
-            "CyberPup Bot · Updates automatically · CPD:{creator_id}"
+            "CyberPup Bot · Last updated at {last_updated} · Updates automatically: growth stats every {check_delay_minutes} min, live status every minute, Discord members every {discord_check_interval} min{}",
+            dashboard_marker(creator_id)
         )));
 
     if let Some(username) = twitch_username.as_deref().filter(|s| !s.is_empty()) {
@@ -210,14 +264,14 @@ async fn update_dashboard_locked(
             .messages(&ctx.http, serenity::GetMessages::new().limit(100))
             .await?;
         let bot_id = ctx.cache.current_user().id;
-        let marker = format!("CPD:{creator_id}");
+        let marker = dashboard_marker(creator_id);
+        let legacy_marker = format!("CPD:{creator_id}");
         let mut matches = recent_messages.into_iter().filter(|message| {
             message.author.id == bot_id
                 && message.embeds.iter().any(|embed| {
-                    embed
-                        .footer
-                        .as_ref()
-                        .is_some_and(|footer| footer.text.contains(&marker))
+                    embed.footer.as_ref().is_some_and(|footer| {
+                        footer.text.contains(&marker) || footer.text.contains(&legacy_marker)
+                    })
                 })
         });
 
