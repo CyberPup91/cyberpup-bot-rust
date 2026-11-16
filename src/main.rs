@@ -3,7 +3,7 @@ mod commands;
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -37,6 +37,34 @@ pub struct Data {
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
+static GLOBAL_COMMAND_CLEANUP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+async fn clear_global_commands_once(ctx: &serenity::Context, data: &Data) -> Result<(), Error> {
+    let lock = GLOBAL_COMMAND_CLEANUP_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().await;
+    let already_done: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM startup_actions WHERE action='clear_global_commands_v1')",
+    )
+    .fetch_one(&data.db)
+    .await?;
+    if already_done != 0 {
+        return Ok(());
+    }
+
+    let existing = serenity::Command::get_global_commands(&ctx.http).await?;
+    if !existing.is_empty() {
+        serenity::Command::set_global_commands(&ctx.http, Vec::new()).await?;
+    }
+    sqlx::query("INSERT OR IGNORE INTO startup_actions(action,completed_at) VALUES('clear_global_commands_v1',unixepoch())")
+        .execute(&data.db)
+        .await?;
+    println!(
+        "🧹 One-time global slash command cleanup complete (removed {}).",
+        existing.len()
+    );
+    Ok(())
+}
+
 async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -45,6 +73,10 @@ async fn handle_event(
     match event {
         serenity::FullEvent::Ready { data_about_bot } => {
             println!("Logged in as {}", data_about_bot.user.name);
+
+            if let Err(error) = clear_global_commands_once(ctx, data).await {
+                tracing::error!("Could not clear global slash commands: {error}");
+            }
 
             let cfg = commands::whitelabel::load_config().await;
             let _ = commands::whitelabel::apply_saved_presence(ctx, &cfg).await;
@@ -474,6 +506,9 @@ async fn main() -> Result<(), Error> {
 
     // Main bot database.
     let db = sqlx::SqlitePool::connect("sqlite:///app/data/cyberpup_bot.db?mode=rwc").await?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS startup_actions(action TEXT PRIMARY KEY,completed_at INTEGER NOT NULL)")
+        .execute(&db)
+        .await?;
 
     // Shared CreatorStats and GoLive database.
     let stats_db = sqlx::SqlitePool::connect("sqlite:///app/data/stats.db?mode=rwc").await?;
