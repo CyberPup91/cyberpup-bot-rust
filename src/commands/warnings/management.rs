@@ -38,31 +38,54 @@ pub async fn warn(
     >,
 ) -> Result<(), Error> {
     if target == ctx.author().id {
-        ctx.say("❌ You cannot warn yourself.").await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content("❌ You cannot warn yourself.")
+                .ephemeral(true),
+        )
+        .await?;
         return Ok(());
     }
+
     let guild_id = ctx.guild_id().ok_or("This command requires a server.")?;
+
     let member = match guild_id.member(ctx, target).await {
         Ok(member) => member,
         Err(_) => {
-            ctx.say("❌ The target must be a member of this server.")
-                .await?;
+            ctx.send(
+                poise::CreateReply::default()
+                    .content("❌ The target must be a member of this server.")
+                    .ephemeral(true),
+            )
+            .await?;
             return Ok(());
         }
     };
+
     if member.user.bot {
-        ctx.say("❌ You cannot issue warnings to bot accounts.")
-            .await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content("❌ You cannot issue warnings to bot accounts.")
+                .ephemeral(true),
+        )
+        .await?;
         return Ok(());
     }
+
     if !can_warn(ctx, guild_id, &member) {
-        ctx.say("❌ You cannot warn a member with a role equal to or higher than yours.")
-            .await?;
+        ctx.send(
+            poise::CreateReply::default()
+                .content("❌ You cannot warn a member with a role equal to or higher than yours.")
+                .ephemeral(true),
+        )
+        .await?;
         return Ok(());
     }
+
     let poise::Context::Application(app_ctx) = ctx else {
         return Ok(());
     };
+
     let Some(form) = poise::execute_modal::<_, _, IssueWarningModal>(
         app_ctx,
         None,
@@ -72,14 +95,21 @@ pub async fn warn(
     else {
         return Ok(());
     };
+
     let violation = form.violation.trim();
     let explanation = form.explanation.trim();
+
     if violation.is_empty() || explanation.is_empty() {
         app_ctx
-            .say("❌ The violation title and explanation are required.")
+            .send(
+                poise::CreateReply::default()
+                    .content("❌ The violation title and explanation are required.")
+                    .ephemeral(true),
+            )
             .await?;
         return Ok(());
     }
+
     super::issue_warning(
         app_ctx.serenity_context(),
         app_ctx.data(),
@@ -91,9 +121,15 @@ pub async fn warn(
         require_staff_review.unwrap_or(false),
     )
     .await?;
+
     app_ctx
-        .say(format!("✅ Warning issued to {}.", target.mention()))
+        .send(
+            poise::CreateReply::default()
+                .content(format!("✅ Warning issued to {}.", target.mention()))
+                .ephemeral(true),
+        )
         .await?;
+
     Ok(())
 }
 
@@ -183,29 +219,65 @@ pub async fn history(
         .guild_id()
         .ok_or("This command requires a server.")?
         .get();
+
     let records = super::database::history(&ctx.data().warnings_db, guild_id, user.get()).await?;
+
     if records.is_empty() {
         ctx.say(format!("ℹ️ No warnings recorded for {}.", user.mention()))
             .await?;
         return Ok(());
     }
+
     let mut embed = CreateEmbed::new()
         .title(format!("📜 Warning History: {user}"))
         .description(format!("Showing {} most recent warning(s).", records.len()))
         .color(0xF1C40F);
+
     for record in records {
         let date = chrono::DateTime::parse_from_rfc3339(&record.created_at)
-            .map(|time| format!("<t:{}:d>", time.timestamp()))
-            .unwrap_or(record.created_at.clone());
+            .map(|time| format!("<t:{}:f>", time.timestamp()))
+            .unwrap_or_else(|_| record.created_at.clone());
+
         let status = match record.status.as_str() {
             "resolved" => "🟢 Resolved",
             "closed" => "📁 Closed",
             _ => "🔴 Active",
         };
+
+        let channel = record
+            .channel_id
+            .map(|id| format!("<#{id}>"))
+            .unwrap_or_else(|| "Unknown".into());
+
+        let resolution = match (record.resolved_by, record.resolved_at.as_deref()) {
+            (Some(moderator_id), Some(timestamp)) => {
+                let resolved_date = chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .map(|time| format!("<t:{}:f>", time.timestamp()))
+                    .unwrap_or_else(|_| timestamp.to_string());
+
+                format!("\n**Resolved by:** <@{moderator_id}>\n**Resolved:** {resolved_date}")
+            }
+            (Some(moderator_id), None) => {
+                format!("\n**Resolved by:** <@{moderator_id}>")
+            }
+            (None, Some(timestamp)) => {
+                let resolved_date = chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .map(|time| format!("<t:{}:f>", time.timestamp()))
+                    .unwrap_or_else(|_| timestamp.to_string());
+
+                format!("\n**Resolved:** {resolved_date}")
+            }
+            (None, None) => String::new(),
+        };
+
         embed = embed.field(
             format!("Warning #{} — {}", record.id, record.title),
             format!(
-                "**Date:** {date}\n**Moderator:** <@{}>\n**Status:** {}{}\n**Explanation:** {}",
+                "**Date:** {date}\n\
+                 **Moderator:** <@{}>\n\
+                 **Channel:** {channel}\n\
+                 **Status:** {}{}\n\
+                 **Explanation:** {}{}",
                 record.moderator_id,
                 status,
                 if record.acknowledged_at.is_some() {
@@ -213,13 +285,16 @@ pub async fn history(
                 } else {
                     ""
                 },
-                truncate(&record.explanation, 180)
+                truncate(&record.explanation, 180),
+                resolution,
             ),
             false,
         );
     }
+
     ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
         .await?;
+
     Ok(())
 }
 

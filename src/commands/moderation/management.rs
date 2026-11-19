@@ -129,6 +129,8 @@ pub async fn ban(
     #[description = "Recent messages to delete"] delete_messages: DeleteMessages,
     #[description = "Reason for the ban"] reason: Option<String>,
 ) -> Result<(), Error> {
+    println!("[Moderation] Executing BAN command");
+
     let guild_id = ctx.guild_id().ok_or("Must be in a server.")?;
     let reason = reason.unwrap_or_else(|| "No reason provided".into());
     if let Ok(member) = guild_id.member(ctx, target).await {
@@ -169,6 +171,7 @@ pub async fn timeout(
     #[description = "Duration in minutes (1–40320)"] minutes: u64,
     #[description = "Reason for the timeout"] reason: Option<String>,
 ) -> Result<(), Error> {
+    println!("[Moderation] Executing TIMEOUT command");
     if minutes == 0 || minutes > 40_320 {
         ctx.say("❌ Timeout duration must be between 1 minute and 28 days.")
             .await?;
@@ -229,24 +232,23 @@ async fn ban_with_seconds(
     reason: &str,
 ) -> Result<(), Error> {
     let encoded_reason = percent_encode(reason);
-    let endpoint = format!("https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}?delete_message_seconds={seconds}");
+    let endpoint = format!(
+        "https://discord.com/api/v10/guilds/{guild_id}/bans/{user_id}?delete_message_seconds={seconds}"
+    );
+
     let response = data
         .http
         .put(endpoint)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bot {}", ctx.http().token()),
-        )
+        .header(reqwest::header::AUTHORIZATION, ctx.http().token())
         .header("X-Audit-Log-Reason", encoded_reason)
         .send()
         .await?;
+
     if !response.status().is_success() {
-        return Err(format!(
-            "Discord ban request failed with status {}",
-            response.status()
-        )
-        .into());
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("Discord ban request failed: {body}").into());
     }
+
     Ok(())
 }
 

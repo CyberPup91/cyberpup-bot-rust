@@ -2,7 +2,6 @@ use sqlx::{Row, SqlitePool};
 
 #[derive(Clone, Debug)]
 pub struct WarningConfig {
-    pub guild_id: u64,
     pub category_id: Option<u64>,
     pub staff_role_id: Option<u64>,
     pub mute_role_id: Option<u64>,
@@ -44,7 +43,6 @@ fn id(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<u64>, sqlx::
 
 fn read_config(row: &sqlx::sqlite::SqliteRow) -> Result<WarningConfig, sqlx::Error> {
     Ok(WarningConfig {
-        guild_id: row.try_get::<i64, _>("guild_id")? as u64,
         category_id: id(row, "category_id")?,
         staff_role_id: id(row, "staff_role_id")?,
         mute_role_id: id(row, "mute_role_id")?,

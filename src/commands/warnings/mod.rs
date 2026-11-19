@@ -562,9 +562,18 @@ async fn confirm_close(
         .await?;
     let http = ctx.http.clone();
     let channel = interaction.channel_id;
+
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let _ = channel.delete(&http).await;
+
+        match channel.delete(&http).await {
+            Ok(_) => {
+                println!("[Warnings] Successfully deleted archived warning room {channel}.");
+            }
+            Err(error) => {
+                eprintln!("[Warnings] Failed to delete archived warning room {channel}: {error}");
+            }
+        }
     });
     Ok(())
 }

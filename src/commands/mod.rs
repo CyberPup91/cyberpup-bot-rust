@@ -2,6 +2,8 @@ pub mod admin;
 pub mod builder;
 pub mod counting;
 pub mod creator_stats;
+pub mod custom_commands;
+pub mod emotes;
 pub mod fun;
 pub mod go_live;
 pub mod greeter;
@@ -18,8 +20,9 @@ pub mod warnings;
 pub mod whitelabel;
 
 use crate::{Data, Error};
+use poise::serenity_prelude as serenity;
 
-pub fn all() -> Vec<poise::Command<Data, Error>> {
+pub fn guild() -> Vec<poise::Command<Data, Error>> {
     vec![
         ping::ping(),
         fun::roll(),
@@ -41,9 +44,29 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         warnings::management::warnings(),
         warnings::management::warn(),
         admin::admin(),
+        custom_commands::management::cc_admin(),
         creator_stats::management::creator(),
         greeter::management::greeter(),
         go_live::management::golive(),
         vents::vents(),
     ]
+}
+
+pub fn personal() -> Vec<poise::Command<Data, Error>> {
+    let mut emote = emotes::emote();
+
+    emote.install_context = Some(vec![
+        serenity::InstallationContext::Guild,
+        serenity::InstallationContext::User,
+    ]);
+
+    emote.interaction_context = Some(vec![serenity::InteractionContext::Guild]);
+
+    vec![emote]
+}
+
+pub fn all() -> Vec<poise::Command<Data, Error>> {
+    let mut commands = guild();
+    commands.extend(personal());
+    commands
 }

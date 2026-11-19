@@ -598,7 +598,11 @@ pub async fn text(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
 
             app_ctx
-                .say("✅ Sticky text message set for this channel!")
+                .send(
+                    poise::CreateReply::default()
+                        .content("✅ Sticky text message set for this channel!")
+                        .ephemeral(true),
+                )
                 .await?;
         }
     }
@@ -685,7 +689,11 @@ pub async fn embed(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
 
             app_ctx
-                .say("✅ Sticky embed message set for this channel!")
+                .send(
+                    poise::CreateReply::default()
+                        .content("✅ Sticky embed message set for this channel!")
+                        .ephemeral(true),
+                )
                 .await?;
         }
     }

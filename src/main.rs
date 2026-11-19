@@ -3,7 +3,7 @@ mod commands;
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -17,6 +17,7 @@ pub struct StickyRuntime {
 #[derive(Clone)]
 pub struct Data {
     pub db: sqlx::SqlitePool,
+    pub custom_commands_db: sqlx::SqlitePool,
     pub stats_db: sqlx::SqlitePool,
     pub greeters_db: sqlx::SqlitePool,
     pub tickets_db: sqlx::SqlitePool,
@@ -37,34 +38,6 @@ pub struct Data {
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
-static GLOBAL_COMMAND_CLEANUP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-async fn clear_global_commands_once(ctx: &serenity::Context, data: &Data) -> Result<(), Error> {
-    let lock = GLOBAL_COMMAND_CLEANUP_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().await;
-    let already_done: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM startup_actions WHERE action='clear_global_commands_v1')",
-    )
-    .fetch_one(&data.db)
-    .await?;
-    if already_done != 0 {
-        return Ok(());
-    }
-
-    let existing = serenity::Command::get_global_commands(&ctx.http).await?;
-    if !existing.is_empty() {
-        serenity::Command::set_global_commands(&ctx.http, Vec::new()).await?;
-    }
-    sqlx::query("INSERT OR IGNORE INTO startup_actions(action,completed_at) VALUES('clear_global_commands_v1',unixepoch())")
-        .execute(&data.db)
-        .await?;
-    println!(
-        "🧹 One-time global slash command cleanup complete (removed {}).",
-        existing.len()
-    );
-    Ok(())
-}
-
 async fn handle_event(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
@@ -74,8 +47,11 @@ async fn handle_event(
         serenity::FullEvent::Ready { data_about_bot } => {
             println!("Logged in as {}", data_about_bot.user.name);
 
-            if let Err(error) = clear_global_commands_once(ctx, data).await {
-                tracing::error!("Could not clear global slash commands: {error}");
+            // Register user-installable personal application commands globally.
+            let personal_commands = commands::personal();
+            match poise::builtins::register_globally(&ctx.http, &personal_commands).await {
+                Ok(_) => println!("[Commands] Personal application commands registered."),
+                Err(error) => eprintln!("[Commands] Failed to register personal commands: {error}"),
             }
 
             let cfg = commands::whitelabel::load_config().await;
@@ -94,7 +70,7 @@ async fn handle_event(
                 status, guild.name, guild.id
             );
 
-            match poise::builtins::register_in_guild(ctx, &commands::all(), guild.id).await {
+            match poise::builtins::register_in_guild(ctx, &commands::guild(), guild.id).await {
                 Ok(_) => println!("✅ Commands synced to guild: {} ({})", guild.name, guild.id),
                 Err(e) => eprintln!(
                     "[Sync Error] Failed to sync to {} ({}): {}",
@@ -234,6 +210,11 @@ async fn handle_event(
             if let Err(error) = commands::message_logger::log_sent(ctx, data, new_message).await {
                 tracing::warn!("Could not log message: {error}");
             }
+            if let Err(error) =
+                commands::custom_commands::handle_message(ctx, data, new_message).await
+            {
+                tracing::warn!("Custom command handler failed: {error}");
+            }
 
             let channel_id = new_message.channel_id;
             let ch_id = channel_id.get();
@@ -293,6 +274,7 @@ async fn handle_event(
 
             let ctx = ctx.clone();
             let db = data.db.clone();
+            let custom_commands_db = data.custom_commands_db.clone();
             let stats_db = data.stats_db.clone();
             let greeters_db = data.greeters_db.clone();
             let tickets_db = data.tickets_db.clone();
@@ -320,6 +302,7 @@ async fn handle_event(
 
                 let dummy_data = Data {
                     db,
+                    custom_commands_db,
                     stats_db,
                     greeters_db,
                     tickets_db,
@@ -445,6 +428,9 @@ async fn handle_event(
         serenity::FullEvent::InteractionCreate {
             interaction: serenity::Interaction::Component(component),
         } => {
+            if commands::custom_commands::handle_component(ctx, data, component).await? {
+                return Ok(());
+            }
             if commands::vents::handle_component(ctx, data, component).await? {
                 return Ok(());
             }
@@ -524,6 +510,11 @@ async fn main() -> Result<(), Error> {
     // Dedicated Greeter database.
     let greeters_db = sqlx::SqlitePool::connect("sqlite:///app/data/greeters.db?mode=rwc").await?;
 
+    let custom_commands_db =
+        sqlx::SqlitePool::connect("sqlite:///app/data/commands.db?mode=rwc").await?;
+
+    commands::custom_commands::database::init_db(&custom_commands_db).await?;
+
     commands::greeter::database::init_db(&greeters_db).await?;
 
     // Dedicated ticket database, preserving compatibility with the Python cog.
@@ -578,6 +569,7 @@ async fn main() -> Result<(), Error> {
         sticky_channels,
         sticky_locks,
         sticky_runtime,
+        custom_commands_db,
     };
 
     let framework = poise::Framework::builder()
