@@ -247,8 +247,9 @@ async fn handle_event(
                 }
             }
 
-            // Keep the ordinary Sticky cog's existing bot-message behavior.
-            if new_message.author.bot {
+            // Ignore messages sent by CyberPup itself, but allow other bots
+            // to trigger sticky repositioning.
+            if new_message.author.id == ctx.cache.current_user().id {
                 return Ok(());
             }
 

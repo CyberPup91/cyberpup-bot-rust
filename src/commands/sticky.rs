@@ -283,7 +283,16 @@ async fn find_sticky_messages(
 
     Ok(messages
         .into_iter()
-        .filter(|message| message.author.id == bot_id && message.content.contains(marker))
+        .filter(|message| {
+            message.author.id == bot_id
+                && (message.content.contains(marker)
+                    || message.embeds.iter().any(|embed| {
+                        embed
+                            .footer
+                            .as_ref()
+                            .is_some_and(|footer| footer.text.contains(marker))
+                    }))
+        })
         .collect())
 }
 
@@ -325,7 +334,7 @@ async fn adopt_sticky_messages(
 // Embed reconstruction
 // -----------------------------------------------------------------------------
 
-fn build_embed(json_str: &str) -> Result<serenity::CreateEmbed, Error> {
+fn build_embed(json_str: &str, marker: &str) -> Result<serenity::CreateEmbed, Error> {
     let value: serde_json::Value = serde_json::from_str(json_str)?;
 
     let mut builder = serenity::CreateEmbed::default();
@@ -378,17 +387,27 @@ fn build_embed(json_str: &str) -> Result<serenity::CreateEmbed, Error> {
         }
     }
 
-    if let Some(footer) = value.get("footer") {
-        if let Some(text) = footer.get("text").and_then(|v| v.as_str()) {
-            let mut footer_builder = serenity::CreateEmbedFooter::new(text);
+    // Preserve the original footer and append the invisible sticky marker.
+    let footer = value.get("footer");
 
-            if let Some(icon_url) = footer.get("icon_url").and_then(|v| v.as_str()) {
-                footer_builder = footer_builder.icon_url(icon_url);
-            }
+    let mut footer_text = footer
+        .and_then(|f| f.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
 
-            builder = builder.footer(footer_builder);
-        }
+    footer_text.push_str(marker);
+
+    let mut footer_builder = serenity::CreateEmbedFooter::new(footer_text);
+
+    if let Some(icon_url) = footer
+        .and_then(|f| f.get("icon_url"))
+        .and_then(|v| v.as_str())
+    {
+        footer_builder = footer_builder.icon_url(icon_url);
     }
+
+    builder = builder.footer(footer_builder);
 
     if let Some(fields) = value.get("fields").and_then(|v| v.as_array()) {
         for field in fields {
@@ -478,7 +497,7 @@ async fn stick_message_locked(
     }
 
     let embed = match config.embed_data.as_deref() {
-        Some(json_str) => Some(build_embed(json_str)?),
+        Some(json_str) => Some(build_embed(json_str, &marker)?),
         None => None,
     };
 
@@ -486,9 +505,8 @@ async fn stick_message_locked(
 
     if let Some(content) = config.content.as_deref() {
         builder = builder.content(format!("{content}{marker}"));
-    } else {
-        // Keep the identity invisible while still searchable after ambiguous
-        // send failures or a failed database update.
+    } else if embed.is_none() {
+        // Fallback for a sticky without text or an embed.
         builder = builder.content(marker.clone());
     }
 

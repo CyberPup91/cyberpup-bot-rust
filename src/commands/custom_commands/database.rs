@@ -3,6 +3,7 @@ use sqlx::{FromRow, SqlitePool};
 #[derive(Debug, Clone, FromRow)]
 pub struct CustomCommand {
     pub id: i64,
+    #[allow(dead_code)]
     pub guild_id: i64,
     pub name: String,
     pub response: String,
