@@ -57,31 +57,53 @@ impl TwitchApi {
             }
         }
 
+        let client_id = self.client_id.clone();
+        let client_secret = self.client_secret.clone();
+
+        // Log credential presence for debugging.
+        eprintln!("[TwitchOAuth] Attempting token fetch: client_id present={}, client_secret present={}", 
+            !client_id.is_empty(), !client_secret.is_empty());
+
         let response = self
             .http
             .post(TWITCH_AUTH)
-            .query(&[
-                ("client_id", self.client_id.as_str()),
-                ("client_secret", self.client_secret.as_str()),
+            .form(&[
                 ("grant_type", "client_credentials"),
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
             ])
             .send()
-            .await?
-            .error_for_status()?
+            .await
+            .map_err(|e| format!("OAuth token request failed: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read response>".to_string());
+            return Err(format!(
+                "OAuth token request failed: HTTP {status} - {body}"
+            )
+            .into());
+        }
+
+        let token_data = response
             .json::<TokenResponse>()
-            .await?;
+            .await
+            .map_err(|e| format!("Failed to parse OAuth response: {e}"))?;
 
         // Refresh five minutes before the actual expiration.
-        let expires_in = response.expires_in.saturating_sub(300).max(60);
+        let expires_in = token_data.expires_in.saturating_sub(300).max(60);
 
         let token = CachedToken {
-            access_token: response.access_token.clone(),
+            access_token: token_data.access_token.clone(),
             expires_at: Instant::now() + Duration::from_secs(expires_in),
         };
 
         *cached = Some(token);
 
-        Ok(response.access_token)
+        Ok(token_data.access_token)
     }
 
     async fn get_user_id(
